@@ -1,27 +1,48 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom');
+const path = require('path');
 
-const client = new Client({
-    authStrategy: new LocalAuth()
-});
+async function connectToWhatsApp() {
+    const { state, saveCreds } = await useMultiFileAuthState(path.resolve(__dirname, './auth_info'));
 
-client.on('qr', (qr) => {
-    // Generar código QR para escanear
-    qrcode.generate(qr, { small: true });
-});
+    const sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: true
+    });
 
-client.on('authenticated', () => {
-    console.log('¡Autenticado!');
-});
+    sock.ev.on('creds.update', saveCreds);
 
-client.on('ready', () => {
-    console.log('El bot está listo!');
-});
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect.error instanceof Boom && lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut;
+            console.log('connection closed due to', lastDisconnect.error, ', reconnecting', shouldReconnect);
+            if (shouldReconnect) {
+                connectToWhatsApp();
+            }
+        } else if (connection === 'open') {
+            console.log('opened connection');
+        }
+    });
 
-client.on('message', msg => {
-    if (msg.body === '!ping') {
-        msg.reply('¡Pong!');
-    }
-});
+    sock.ev.on('messages.upsert', async (m) => {
+        const message = m.messages[0];
+        const messageType = Object.keys(message.message)[0];
+        const text = message.message.conversation || message.message.extendedTextMessage?.text || "";
 
-client.initialize();
+        console.log(JSON.stringify(m, undefined, 2));
+        console.log('replying to', message.key.remoteJid);
+
+        // Check if the message is sent by the bot itself
+        if (message.key.fromMe) return;
+
+        if (text.toLowerCase() === 'ping') {
+            await sock.sendMessage(message.key.remoteJid, { text: 'pong' });
+        } else if (text.toLowerCase() === 'pong') {
+            await sock.sendMessage(message.key.remoteJid, { text: 'ping' });
+        }
+    });
+}
+
+// run in main file
+connectToWhatsApp();
